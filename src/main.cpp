@@ -1,106 +1,110 @@
-#include <Arduino.h>
+/*
+FeinstaubLoRa
 
-uint8_t read_buffer[255];
-uint8_t read_position = 0;
+Pinout: 
+- SDS011 5V  to ESP32 5V / Vin
+- SDS011 GND to ESP32 GND
+- SDS011 TX  to ESP32 13
+- SDS011 RX  to ESP32 21
 
-typedef struct
-{
-	uint16_t pm25; 
-	uint16_t pm10;
-} measurement;
+Copyright (c) 2020 by Tobias Mädel <feinstaublora@tbspace.de>
+Written for Data Network Alfeld e.V. - https://dna-ev.de 
+All rights reserved.
 
-measurement incoming_measurement; 
+Redistribution and use in source and binary forms, with or without modification, 
+are permitted provided that the following conditions are met:
 
+* Redistributions of source code must retain the above copyright notice, this list 
+of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice, this 
+list of conditions and the following disclaimer in the documentation and/or other 
+materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND 
+CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, 
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE 
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR 
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT 
+NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; 
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER 
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, 
+STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) 
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
+ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.  
+*/
+#include "main.h"
 
 void setup()
 {
 	// Debug Serial
 	Serial.begin(9600);
 
-	// UART for SDS011 - RX 13, TX 21 (connect SDS011 TX to 13, SDS011 RX to 21!) 
-	Serial2.begin(9600, SERIAL_8N1, 13, 21);
-}
+	Serial.println("FeinstaubLoRa starting...");
 
+    oled_init();
+    oled_draw_frame();
 
-void measurement_received(measurement data)
-{
-	#ifdef DEBUG
-		Serial.print("Measurement: PM2.5: ");
-		Serial.print(data.pm25);
-		Serial.print(" µg/m³ - PM10: "); 
-		Serial.print(data.pm10);
-		Serial.println(" µg/m³");
-	#endif
+    lora_init();
 
-}
+	delay(1000);
 
-uint8_t parse_packet(uint8_t *packet_buffer)
-{
-	// Check for message header, command number and message tail
-	if (packet_buffer[0] == 0xAA && packet_buffer[1] == 0xC0 && packet_buffer[9] == 0xAB)
-	{
-		// Calculate checksum
-		uint8_t checksum = 0x00; 
-		for (uint8_t i = 2; i <= 7; i++)
-		{
-			checksum += packet_buffer[i];
-		}
-
-		// Checksum invalid? 
-		if (packet_buffer[8] != checksum)
-		{
-			return 0; 
-		}
-
-		#ifdef DEBUG
-			Serial.print("Received a valid packet: ");
-			for (uint8_t i = 0; i < 10; i++)
-			{
-				char strbuf[255];
-				snprintf(strbuf, 250, "%02x", packet_buffer[i]);
-				Serial.print(strbuf);
-			}
-			Serial.println();
-		#endif
-
-		incoming_measurement.pm25 = packet_buffer[2];
-		incoming_measurement.pm25 |= (packet_buffer[3] << 8);
-
-		incoming_measurement.pm10 = packet_buffer[4];
-		incoming_measurement.pm10 |= (packet_buffer[5] << 8);
-
-		measurement_received(incoming_measurement);
-
-		return 1;
-	}
-	return 0;
+    sds011_init();
 }
 
 void loop()
 {
-	if (Serial2.available())
+	// MCCI LoRaWAN main loop
+	os_runloop_once();
+
+	sds011_read_loop();
+
+	// state machine for sensor state
+	switch (current_state)
 	{
-		uint8_t incoming_byte = Serial2.read();
+		case STATE_SLEEP:
+			if (time_spent_in_state >= (MEASUREMENT_INTERVAL_S - MEASUREMENTS_PER_TX))
+			{        
+                u8g2.setPowerSave(0);
 
-		// Wait for the start of a new packet (0xAA) or just save all incoming bytes if we've already seen the start.
-		if (read_position != 0 || incoming_byte == 0xAA)
-		{
-			read_buffer[read_position++] = incoming_byte;
-		}
-
-		// If we're reading 0xAB and have at least 10 bytes in our buffer, this might be a valid packet
-		if (incoming_byte == 0xAB && read_position >= 10)
-		{		
-			// Set the read_position counter back to 0, if we've received a valid packet. 
-			// Otherwise keep listening for a bit, we might have started listening mid-packet. 
-			if (parse_packet(read_buffer + read_position - 10))
-			{
-				read_position = 0;
+				// Wake SDS011 up (twice, to be safe) 
+				sds011_send_command(0xB4, 0x06, 0x01, 0x01);
+				delay(100);
+				sds011_send_command(0xB4, 0x06, 0x01, 0x01);
+				
+				//Serial.println("Waking SDS011 up, waiting for sensor to stabilize.");
+				time_spent_in_state = 0; 
+				current_state = STATE_WAITING_FOR_STABILIZE;
 			}
-		}
-
-		// Limit read_position to 250
-		read_position %= 250; 
+			break;
+		case STATE_WAITING_FOR_STABILIZE:
+			if (time_spent_in_state >= WAIT_TIME_STABILIZE_S)
+			{
+				//Serial.println("Measurements stable. Taking measurements.");
+				time_spent_in_state = 0; 
+				current_state = STATE_WAITING_FOR_MEASUREMENTS;
+			}
+			break; 
+		case STATE_WAITING_FOR_MEASUREMENTS: 
+			// Waiting for measurements...
+            if (time_spent_in_state >= 60)
+            {
+                // We haven't received enough measurements in 60 seconds to send a packet and advance the state machine. 
+                // This is probably a sensor communication issue or another error. 
+                Serial.println("Haven't received enough packets in 60 seconds to transmit a message. Rebooting ESP!");
+                delay(500);
+                ESP.restart();
+            }
+			break;
+		default:
+			break;
 	}
 
+    if (repaint_display)
+    {
+        oled_draw_frame();
+        repaint_display = 0;
+    }
 }
