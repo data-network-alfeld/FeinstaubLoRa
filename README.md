@@ -1,4 +1,4 @@
-![DNA e.V.](https://screenshot.tbspace.de/kzmdiwjhayn.png) &nbsp; SDS011 LoRaWAN sensor
+[![DNA e.V.](https://screenshot.tbspace.de/kzmdiwjhayn.png)](https://dna-ev.de/) &nbsp; SDS011 LoRaWAN sensor
 =============================
 
 ![Photo of SDS011 Heltec setup](https://screenshot.tbspace.de/scnqtfadejv.jpg)
@@ -42,3 +42,5 @@ The [TTN Decoder](ttn_decoder.js) needs to be copied into the "Payload Formats" 
 
 [TTN Decoder](ttn_decoder.js)  
 [Video of a measurement cycle](https://www.youtube.com/watch?v=NoSQvhXs800)  
+
+[Data Network Alfeld e.V.](https://dna-ev.de/)
