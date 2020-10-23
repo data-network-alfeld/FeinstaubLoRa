@@ -65,7 +65,7 @@ void loop()
 	switch (current_state)
 	{
 		case STATE_SLEEP:
-			if (time_spent_in_state >= (MEASUREMENT_INTERVAL_S - MEASUREMENTS_PER_TX))
+			if (time_spent_in_state >= (MEASUREMENT_INTERVAL_S - (WAIT_TIME_STABILIZE_S + MEASUREMENTS_PER_TX)))
 			{        
                 u8g2.setPowerSave(0);
 
